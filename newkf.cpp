@@ -1003,7 +1003,15 @@ bool readPlayer(FILE* fp, Player& pc)
     }
     if (pc.role == -1)
     {
-        printf("Error: Unknown PC role name: %s\n", buf);
+        // ENDPC 是 PC 段的正常结束标记，不是错误。外层调用者会在
+        // readPlayer 返回 false 后再读一次 token 判断是否为 ENDPC，
+        // 但这里已经把 "ENDPC" 读进 buf 且 fseek 回退了，所以外层
+        // 能正确读到。原先在这里无条件打印错误，导致每个 PC 段都
+        // 多出一行 "Unknown PC role name: ENDPC" 的噪声输出。
+        if (strcmp(buf, "ENDPC") != 0)
+        {
+            printf("Error: Unknown PC role name: %s\n", buf);
+        }
         fseek(fp, pos, SEEK_SET);
         return false;
     }
