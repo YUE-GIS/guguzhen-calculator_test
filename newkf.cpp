@@ -734,6 +734,14 @@ bool getNpcRolePrefix(char* str, int& role, int& prefix)
             break;
         }
     }
+    // 别名：游戏内插件「计算器配置生成」把史莱姆写成 SLIME，
+    // 而本计算器的内部简称是 SHI。这里做一次映射，避免插件生成的配置
+    // 因名字对不上而整个文件加载失败。只在解析层处理，不动 npcName[]，
+    // 因此不影响下标，也不影响 al 命令依赖的 NPC_COUNT_OLD2。
+    if (role == -1 && strcmp(str, "SLIME") == 0)
+    {
+        role = ROLE_SHI;
+    }
     if (role == -1) return false;
     if (role == ROLE_LIU)
     {
@@ -899,7 +907,10 @@ bool readNonPlayer(FILE* fp, NonPlayer& npc)
         fseek(fp, pos, SEEK_SET);
         return false;
     }
-    if (fscanf(fp, "%d%d", &npc.lvl, &npc.prefixCount) != 2 || npc.lvl < 1 ||
+    // 等级下限放宽到 0：游戏内插件生成的配置默认把「基础等级」填 0，
+    // 原先 lvl < 1 会直接拒绝整个文件。0 级没有实际意义（各项数值都会是 0），
+    // 但让它能加载总比整个配置打不开好；用户应自行把等级改成一个真实值。
+    if (fscanf(fp, "%d%d", &npc.lvl, &npc.prefixCount) != 2 || npc.lvl < 0 ||
         npc.prefixCount < 0 || npc.prefixCount > 4)
     {
         fseek(fp, pos, SEEK_SET);
