@@ -1184,22 +1184,25 @@ bool readPlayer(FILE* fp, Player& pc)
                 return false;
             }
         }
-        if (!isNumber(buf) || sscanf(buf, "%d", &b.pAtkB) != 1)
+        if (!isNumberDot(buf) || sscanf(buf, "%lf", &b.pAtkB) != 1)
         {
             fseek(fp, pos, SEEK_SET);
             return false;
         }
-        if (fscanf(fp, "%d%s", &b.mAtkB, buf) != 2)
+        if (fscanf(fp, "%lf%s", &b.mAtkB, buf) != 2)
         {
             fseek(fp, pos, SEEK_SET);
             return false;
         }
-        if (!isNumber(buf) || sscanf(buf, "%d", &b.aAtk) != 1)
+        if (!isNumberDot(buf) || sscanf(buf, "%lf", &b.aAtk) != 1)
         {
             fseek(fp, pos, SEEK_SET);
             return false;
         }
-        if (fscanf(fp, "%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d",
+        // 25 个字段：double 用 %lf，int 用 %d。
+        // 下面这行曾整串写成 %d，导致 18 个 double 字段只写入低 4 字节，
+        // 读出来全是 ~1e-319 的次正规数（等价于 0）。
+        if (fscanf(fp, "%lf%lf%lf%lf%lf%lf%lf%lf%lf%lf%lf%d%lf%lf%d%lf%lf%lf%lf%lf%d%d%d%d%d",
             &b.pBrcP, &b.pBrcA, &b.mBrcP, &b.mBrcA, &b.cBrcP,
             &b.spdB, &b.pDefB, &b.pRdc, &b.mDefB, &b.mRdc,
             &b.hpM, &b.hpRecP, &b.hpRecA, &b.sldM, &b.sldRecP, &b.sldRecA,
@@ -1552,9 +1555,12 @@ void readConfig(const char* fileName)
                     exit(-1);
                 }
                 gears[gearSlot[gear.type]].push_back(gear);
-                if (gears[gearSlot[gear.type]].size() > 255)
+                // AttrKey::gi 是 int8_t，只能存 -128..127。候选数超过 127 时，
+                // 索引 128 起会溢出成负数，gears[i][gi[i]] 变成负下标越界读，
+                // 搜索会在不报错的情况下选中错误的装备。这里把上限对齐到 int8_t。
+                if (gears[gearSlot[gear.type]].size() > 127)
                 {
-                    printf("Too many candidate gears\n");
+                    printf("Too many candidate gears (max 127 per slot)\n");
                     exit(-1);
                 }
             }
@@ -1704,8 +1710,35 @@ void readConfig(const char* fileName)
         {
             fgets(buf, sizeof(buf), fp);
         }
-        else if (strcmp(buf, "END") == 0 || isNumber(buf))
+        else if (strcmp(buf, "END") == 0)
         {
+            break;
+        }
+        else if (isNumber(buf))
+        {
+            // 裸数字曾被当作合法的结束标记。它同时会让后面所有 section 被无声丢弃，
+            // 但也确实被更早的配置依赖（例如玩家行末尾的光环个数），所以在没有
+            // 明确证据前不能直接报错。折中：只在后面还有非空内容时打印警告。
+            long peek = ftell(fp);
+            fseek(fp, 0, SEEK_END);
+            long end = ftell(fp);
+            fseek(fp, peek, SEEK_SET);
+            bool trailingOnly = true;
+            for (long p = peek; p < end; ++p)
+            {
+                int c = fgetc(fp);
+                if (c == EOF) break;
+                if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+                {
+                    trailingOnly = false;
+                    break;
+                }
+            }
+            fseek(fp, peek, SEEK_SET);
+            if (!trailingOnly)
+            {
+                fprintf(stderr, "Warning: config parsing stops at bare number %s; later sections are ignored\n", buf);
+            }
             break;
         }
         else
@@ -2038,6 +2071,33 @@ void prepareNpcBStat(const NonPlayer& npc, BStat& b)
     b.myst = 0;
     b.sklC = 0;
     b.houC = 0;
+    // 下面几个字段在 switch 的各 case 里并非都赋值，不补会读到调用方的栈垃圾。
+    // ROLE_SHI 的 case 会显式覆盖 aAtk；ROLE_LIU 的 aAtk 由 prepareLiuStat 另行赋值。
+    // 两个 case 都不会先读 aAtk，所以在 switch 之前统一清零是安全的。
+    //
+    // tStr..tMnd：只有 ROLE_MO 的魔穿（2813）和 ROLE_MIN 的技能（3307）会读。
+    //   原先完全不赋值 → 读到栈残留；更糟的是 3307 会做 `tSpr / tInt`
+    //   整数除法，残留为 0 时直接除零崩溃。
+    //   注意：tAgi 由上面各 case 赋了 npc.lvl，这里绝不能覆盖，否则忍无可忍的
+    //   敏捷判定（tAgi 差 6 倍）会失效，所以只补未被 case 赋值的 5 项。
+    b.tStr = 0;
+    b.tInt = 0;
+    b.tVit = 0;
+    b.tSpr = 0;
+    b.tMnd = 0;
+    b.rankLevel = 0;
+    b.renCounter = 0;
+    b.bugPoint = 0;
+    b.mode = 0;
+    b.qiAbsorb = 0.0;
+    b.growth = 0;
+    b.hpPot = false;
+    b.sldPot = false;
+    b.ziFlag = false;
+    b.minFlag = false;
+    b.piaoFlag = false;
+    b.hpS = 0.0;
+    b.sldS = 0.0;
     for (int i = 0; i < WISH_COUNT; ++i)
     {
         b.wish[i] = 0;
@@ -2511,6 +2571,20 @@ void preparePcBStat(const Player& pc, BStat& b)
     b.sld = b.sldM;
     b.growth = pc.growth;
 
+    // 补全遗漏字段。这些原本没被赋值，读到的是调用方栈上的残留值：
+    //   hpPot/sldPot 决定药水是否已用掉 —— 直接影响战果；
+    //   hpS/sldS 是回合基数（calcBattle 每回合会重设，但首回合前可能被读）；
+    //   四个 flag 在 calcBattle 里每场都会重设，这里补上是防御性的。
+    // 单线程时栈布局固定、残留值稳定，所以问题被掩盖了；多线程时栈布局变化，
+    // 残留值随之改变，表现为「并行版和串行版结果系统性不同」。
+    b.hpPot = false;
+    b.sldPot = false;
+    b.ziFlag = false;
+    b.minFlag = (b.role == ROLE_MIN);
+    b.piaoFlag = false;
+    b.hpS = b.hpM;
+    b.sldS = b.sldM;
+
     b.alias = pc.alias;
 }
 
@@ -2611,6 +2685,10 @@ BResult calcBattle(const BStat& attacker, const BStat& defender, bool showDetail
         levelPower = b[0].atkLvl - b[1].atkLvl > 20 ? 20 : b[0].atkLvl - b[1].atkLvl;
         // 环境争夺
         levelPower -= b[1].rankLevel;
+        // TODO(fix-2): 此处缺少下界。levelPower 负得太多会让伤害变负，
+        // 被 `if (pa[s] > 0)` 整段跳过，表现为「攻击凭空消失」。
+        // 加 `if (levelPower < -20) levelPower = -20;` 可修，但会改变 R>=34 的战果，
+        // 属于数值行为调整，留到第二批。
     }
 
     if (rseed == NULL) rseed = &rseedGlobal;
@@ -4006,6 +4084,346 @@ AttrScore calcScoreNpc(const BStat& stat, bool showDetail, bool showCI, int* rse
     return AttrScore(totalWinRate, totalHpRate);
 }
 
+// ---------------------------------------------------------------------------
+// 并行版 calcScoreNpc
+//
+// 动机：原版把所有 NPC、所有场次放在一个顺序循环里，共用同一个 rseed 流，
+// 因此 bnpc 完全无法多线程（实测 threads 1..16 耗时恒定）。单核跑满后
+// 唯一的提速手段就是并行。
+//
+// 做法：任务粒度 = 一个 NPC 的全部场次。每个任务用「由 rseedGlobal 派生」
+// 的独立种子，互不干扰。算完按 index 顺序打印，showDetail 的输出顺序不变。
+//
+// 与串行版的区别（有意为之）：
+//   * 串行版所有 NPC 共用一条随机流，后面的 NPC 受前面消耗量影响；
+//     并行版每个 NPC 起点独立。两者的统计性质相同（都是均匀抽样），
+//     但具体数字不同 —— 而原版本来也每次都不同（rseedGlobal = time(NULL)）。
+// ---------------------------------------------------------------------------
+
+struct NpcScoreTask
+{
+    int index;          // npcEnemy 下标
+    int numTests2;      // 已按 prefixN 取整的场次数
+    int prefixN;
+    int rseed;
+    // 输出
+    int win;
+    int draw;
+    double singleHpRate;
+    int actualTests;    // 实际跑的场次（ciTest 提前终止时 < numTests2）
+};
+
+struct NpcScoreWorkerArgs
+{
+    NpcScoreTask* tasks;
+    int taskCount;
+    int startIndex;
+    int stride;
+    const BStat* stat;
+};
+
+// ---------------------------------------------------------------------------
+// 细粒度分片：每个 NPC 拆成若干「场次区间」，合并成一个扁平任务列表。
+//
+// 为什么需要这一层：只按 NPC 分片时，并行度 = NPC 数。实际配置往往只有
+// 1 个 NPC（当前 newkf.in 就是 SHI 一条），那样并行版等于不生效。
+// 按场次再切一次，单个 NPC 也能铺满所有核心。
+//
+// 每个分片用自己的种子，因此各分片的随机流互不影响；同一 NPC 的各分片
+// 结果累加后等价于「跑完了全部场次」。
+// ---------------------------------------------------------------------------
+
+struct NpcShard
+{
+    int npcIndex;       // 归属的 NPC
+    int shardBegin;     // 本分片的起始场次（含）
+    int shardEnd;       // 本分片的结束场次（不含）
+    int numTests2;      // 该 NPC 的总场次（用于 weight 计算）
+    int rseed;          // 本分片独立种子
+    // 输出
+    int win;
+    int draw;
+    double singleHpRate;
+    int actualTests;    // ciTest 提前终止时的实际场次（== shardEnd - shardBegin）
+};
+
+static void runNpcShard(NpcShard& s, const BStat& stat)
+{
+    s.win = 0;
+    s.draw = 0;
+    s.singleHpRate = 0.0;
+    int count = s.shardEnd - s.shardBegin;
+    s.actualTests = count;
+    int j = s.shardBegin;
+    for (; j < s.shardEnd; ++j)
+    {
+        // counter 参数仍传绝对场次号，保持「不同场次用不同前缀组合」的语义
+        BResult br = calcBattle(stat, npcEnemyStat[s.npcIndex], false, j, &s.rseed);
+        if (br.winner == 0)
+        {
+            ++s.win;
+        }
+        else if (br.winner == 2)
+        {
+            ++s.draw;
+        }
+        else
+        {
+            s.singleHpRate += 1 - br.rate;
+        }
+    }
+}
+
+struct ShardWorkerArgs
+{
+    NpcShard* shards;
+    int shardCount;
+    int startIndex;
+    int stride;
+    const BStat* stat;
+};
+
+static void* shardWorker(void* args)
+{
+    ShardWorkerArgs* a = reinterpret_cast<ShardWorkerArgs*>(args);
+    for (int i = a->startIndex; i < a->shardCount; i += a->stride)
+    {
+        runNpcShard(a->shards[i], *a->stat);
+    }
+    return NULL;
+}
+
+// 打印单个 NPC 的结果行（与串行版逐字节相同）
+static void printNpcScoreLine(const NpcScoreTask& t, bool showDetail, bool showCI)
+{
+    int i = t.index;
+    double winRate = (t.actualTests == t.draw ? 0.5 : 1.0 * t.win / (t.actualTests - t.draw));
+    printf("%3d: %s", i, npcName[npcEnemy[i].role - ROLE_NPC]);
+    if (npcEnemy[i].role < ROLE_NPC + NPC_COUNT_OLD)
+    {
+        int prefN = 0;
+        for (int j = 0; j < PREF_COUNT; ++j)
+        {
+            if (npcEnemy[i].prefix & 1 << j)
+            {
+                ++prefN;
+                printf("_%s", prefName[j]);
+            }
+        }
+        for (int j = 0; j < npcEnemy[i].prefixCount - prefN; ++j)
+        {
+            printf("_?");
+        }
+    }
+    else if (npcEnemy[i].role == ROLE_LIU)
+    {
+        if (npcEnemy[i].prefix != 0x3FFFFFFF)
+        {
+            printf("_");
+            for (int j = 0; j < 6; ++j)
+            {
+                int v = (npcEnemy[i].prefix >> (j * 2) & 3);
+                if (v == 3) printf("?");
+                else printf("%d", v);
+            }
+            for (int j = 0; j < 2; ++j)
+            {
+                int v = (npcEnemy[i].prefix >> (j * 6 + 12) & 63);
+                if (v == 63) printf("???");
+                else printf("%d", v + 280);
+            }
+            for (int j = 0; j < 2; ++j)
+            {
+                int v = (npcEnemy[i].prefix >> (j * 3 + 24) & 7);
+                if (v == 7) printf("??");
+                else printf("%d", v + 28);
+            }
+        }
+    }
+    printf(" Lv.%d : Win Rate : %.5lf%% (%d/%d D=%d(%.1lf%%))", npcEnemy[i].lvl,
+        winRate * 100, t.win, t.actualTests - t.draw, t.draw, 100.0 * t.draw / t.actualTests);
+    if (showCI)
+    {
+        double low, high;
+        ci(t.win, t.actualTests - t.draw, low, high);
+        printf(" 95%% CI : [%.5lf%%, %.5lf%%]\n", low * 100, high * 100);
+    }
+    else
+    {
+        printf("\n");
+    }
+}
+
+AttrScore calcScoreNpcParallel(const BStat& stat, bool showDetail, bool showCI, int* rseed)
+{
+    int n = (int)npcEnemy.size();
+    if (n == 0)
+    {
+        if (showDetail) printf("Average Win Rate : %.5lf%%\n", 50.0);
+        return AttrScore(0.5, 1.0);
+    }
+
+    int nThreads = numThreads;
+    if (nThreads < 2)
+    {
+        return calcScoreNpc(stat, showDetail, showCI, rseed);
+    }
+    if (nThreads > 64) nThreads = 64;
+
+    // ciTest > 0 时退回串行版。
+    // 原因：CI 提前终止是「跑到置信区间足够窄就停」，各分片独立判断会得到
+    // 不同的终止点，累加后的总场次与串行版语义不一致。这个模式用得少
+    // （默认 ciTest = 0，按 TESTS 跑满），不值得为它冒正确性风险。
+    if (ciTest > 0)
+    {
+        return calcScoreNpc(stat, showDetail, showCI, rseed);
+    }
+
+    int baseSeed = (rseed != NULL ? *rseed : rseedGlobal);
+
+    // 每个 NPC 的场次信息
+    std::vector<int> npcTests(n), npcPrefixN(n), npcShards(n);
+    long totalShards = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        npcTests[i] = numTests;
+        npcPrefixN[i] = 1;
+        if (npcEnemyStat[i].role < ROLE_NPC + NPC_COUNT_OLD)
+        {
+            int prefixCount = npcEnemyStat[i].psvSkl % 5;
+            int prefix = npcEnemyStat[i].psvSkl / 5;
+            npcPrefixN[i] = prefCount[prefix][prefixCount];
+            npcTests[i] = ((numTests - 1) / npcPrefixN[i] + 1) * npcPrefixN[i];
+        }
+        // 分片数：让总任务数不少于线程数的若干倍，保证负载均衡。
+        // 但每片至少 256 场，避免任务过于琐碎反而变慢。
+        int want = (nThreads * 4 + n - 1) / n;   // 每个 NPC 想要的分片数
+        if (want < 1) want = 1;
+        int maxBySize = npcTests[i] / 256;
+        if (maxBySize < 1) maxBySize = 1;
+        if (want > maxBySize) want = maxBySize;
+        npcShards[i] = want;
+        totalShards += want;
+    }
+
+    std::vector<NpcShard> shards;
+    shards.reserve((size_t)totalShards);
+    unsigned seedMix = (unsigned)baseSeed;
+    for (int i = 0; i < n; ++i)
+    {
+        int m = npcShards[i];
+        int total = npcTests[i];
+        for (int k = 0; k < m; ++k)
+        {
+            NpcShard s;
+            s.npcIndex = i;
+            s.shardBegin = (int)((long long)total * k / m);
+            s.shardEnd = (int)((long long)total * (k + 1) / m);
+            s.numTests2 = total;
+            // 混入 (NPC 下标, 分片下标)，让每个分片有独立随机流
+            seedMix = seedMix * 1664525u + 1013904223u;
+            unsigned m2 = seedMix ^ (0x9E3779B9u * (unsigned)(i * 97 + k + 1));
+            s.rseed = (int)(m2 & 0x7FFFFFFF);
+            if (s.rseed == 0) s.rseed = 1;
+            s.win = 0;
+            s.draw = 0;
+            s.singleHpRate = 0.0;
+            s.actualTests = s.shardEnd - s.shardBegin;
+            shards.push_back(s);
+        }
+    }
+
+    int shardCount = (int)shards.size();
+    int useThreads = nThreads;
+    if (useThreads > shardCount) useThreads = shardCount;
+    if (useThreads < 2)
+    {
+        return calcScoreNpc(stat, showDetail, showCI, rseed);
+    }
+
+    std::vector<pthread_t> threads(useThreads);
+    std::vector<ShardWorkerArgs> args(useThreads);
+    int created = 0;
+    for (int k = 0; k < useThreads; ++k)
+    {
+        args[k].shards = &shards[0];
+        args[k].shardCount = shardCount;
+        args[k].startIndex = k;
+        args[k].stride = useThreads;
+        args[k].stat = &stat;
+        if (pthread_create(&threads[k], NULL, shardWorker, &args[k]) != 0)
+        {
+            break;
+        }
+        ++created;
+    }
+    for (int k = created; k < useThreads; ++k)
+    {
+        shardWorker(&args[k]);
+    }
+    for (int k = 0; k < created; ++k)
+    {
+        pthread_join(threads[k], NULL);
+    }
+
+    // 汇总：按 NPC 顺序，把该 NPC 的所有分片累加
+    double totalWinRate = 0;
+    double totalHpRate = 0;
+    double totalWeight = 0;
+    int shardCursor = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        int win = 0;
+        int draw = 0;
+        double singleHpRate = 0.0;
+        int actual = 0;
+        for (int k = 0; k < npcShards[i]; ++k)
+        {
+            const NpcShard& s = shards[shardCursor + k];
+            win += s.win;
+            draw += s.draw;
+            singleHpRate += s.singleHpRate;
+            actual += s.actualTests;
+        }
+        shardCursor += npcShards[i];
+
+        double winRate = (actual == draw ? 0.5 : 1.0 * win / (actual - draw));
+        double weight = 1.0 * (actual - draw) / actual;
+        if (showDetail)
+        {
+            NpcScoreTask t;
+            t.index = i;
+            t.numTests2 = npcTests[i];
+            t.prefixN = npcPrefixN[i];
+            t.rseed = 0;
+            t.win = win;
+            t.draw = draw;
+            t.singleHpRate = singleHpRate;
+            t.actualTests = actual;
+            printNpcScoreLine(t, showDetail, showCI);
+        }
+        totalWinRate += winRate * weight;
+        // 沿用串行版口径：残血率分母用总场次（不含平局修正）
+        totalHpRate += singleHpRate / actual;
+        totalWeight += weight;
+    }
+    if (totalWeight == 0.0)
+    {
+        totalWinRate = 0.5;
+        totalHpRate = 1.0;
+    }
+    else
+    {
+        totalWinRate /= totalWeight;
+        totalHpRate /= totalWeight;
+    }
+    if (showDetail)
+    {
+        printf("Average Win Rate : %.5lf%%\n", 100.0 * totalWinRate);
+    }
+    return AttrScore(totalWinRate, totalHpRate);
+}
+
 AttrScore calcScorePc(const BStat& stat, bool showDetail, bool showCI, int* rseed = NULL)
 {
     double totalWinRate = 0;
@@ -5257,7 +5675,9 @@ int main(int argc, char* argv[])
                 printf("No NPC data in config file\n");
                 continue;
             }
-            calcScoreNpc(myStat, true, true);
+            // 并行版：每个 NPC 一个任务，用完再按顺序打印。
+            // NPC 少于 2 个或线程设为 1 时自动退回 calcScoreNpc。
+            calcScoreNpcParallel(myStat, true, true, NULL);
         }
         else if (strcmp(tok, "bpc") == 0)
         {
