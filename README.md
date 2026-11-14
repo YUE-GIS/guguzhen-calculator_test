@@ -51,6 +51,16 @@ b大计算器：https://kf.miaola.work/read.php?fid=86&tid=807309&sf=407
 
 # 图形界面
 
+## 前置
+
+本仓库**不存放 exe**，需要先获取 `newkf_64.exe`：
+
+- 从 [Releases](../../releases) 下载，或
+- 从 [Actions](../../actions) 的 artifact 里下载，或
+- 自己编译（见下方「编译」）
+
+把 `newkf_64.exe` 和 `calc_gui.py`、`result_format.py` 放在同一目录。
+
 ## 启动
 
 需要 Python 3.8+（自带 tkinter，无第三方依赖）。
@@ -101,6 +111,9 @@ python calc_gui.py
 4. 右侧看中文报告，可切「原始」看计算器原样输出
 
 「? 自检配置」会先跑一次极短测试，确认当前 exe 能读这份配置。
+
+> **提示**：如果自检报 `Error reading NPC enemy data`，说明 exe 版本太旧
+> （早期版本不认 `SLIME` 这个野怪名）。换一个新编的 exe 即可。
 
 ### al 参数
 
