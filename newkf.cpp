@@ -8,6 +8,9 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <signal.h>
+#if defined(_WIN32)
+#include <windows.h>   // GetSystemInfo，用于自动探测 CPU 核心数
+#endif
 #include <string>
 #include <vector>
 #include <queue>
@@ -516,7 +519,44 @@ const int speedReduceMax = 80;
 char buf[10000];
 int version = 80;
 int rseedGlobal = time(NULL);
-int numThreads = 4;
+
+// 自动探测可用 CPU 核心数。失败时返回 0，调用方回退到默认值。
+// 实测：zig 自带的 MinGW 头文件里没有定义 _SC_NPROCESSORS_ONLN，
+// 只靠 sysconf 会退化成“探测失败”。所以 Windows 下优先用 GetSystemInfo。
+static int detectCpuCount()
+{
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int n = (int)si.dwNumberOfProcessors;
+    if (n < 1) return 0;
+    if (n > 64) n = 64;      // 与 THREADS 的合法上限保持一致
+    return n;
+#else
+#ifdef _SC_NPROCESSORS_ONLN
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) return 0;
+    if (n > 64) n = 64;
+    return (int)n;
+#else
+    return 0;
+#endif
+#endif
+}
+
+// numThreads 的语义：
+//   > 0  : 使用该值（配置 THREADS <n> 或命令 threads <n> 显式指定）
+//   == 0 : 自动，按 CPU 核心数决定
+// 初始化为 0 就是“默认自动”。实际生效值通过 effectiveThreads() 取。
+int numThreads = 0;
+
+static int effectiveThreads()
+{
+    if (numThreads > 0) return numThreads;
+    int n = detectCpuCount();
+    return n > 0 ? n : 4;    // 探测失败时用原来的默认值 4
+}
+
 int numTests = 1000;
 double ciTest = 0;
 int gridSize = 6;
@@ -1586,7 +1626,8 @@ void readConfig(const char* fileName)
         }
         else if (strcmp(buf, "THREADS") == 0)
         {
-            if (fscanf(fp, "%d", &numThreads) != 1 || numThreads < 1 || numThreads > 64)
+            // 0 = 自动（按 CPU 核心数）
+            if (fscanf(fp, "%d", &numThreads) != 1 || numThreads < 0 || numThreads > 64)
             {
                 printf("Error reading THREADS setting\n");
                 exit(-1);
@@ -4282,7 +4323,7 @@ AttrScore calcScoreNpcParallel(const BStat& stat, bool showDetail, bool showCI, 
         return AttrScore(0.5, 1.0);
     }
 
-    int nThreads = numThreads;
+    int nThreads = effectiveThreads();
     if (nThreads < 2)
     {
         return calcScoreNpc(stat, showDetail, showCI, rseed);
@@ -5210,10 +5251,20 @@ AttrPair calcAttr(const AttrEval& eval)
 
     AttrMap sc;
     AttrQueue q;
-    std::vector<pthread_t> threads(numThreads);
+    const int effThreads = effectiveThreads();
+    std::vector<pthread_t> threads(effThreads);
     std::vector<AttrKey> newSeed, cand, cand2;
     std::vector<AttrKey>* pSeed = &attrSeed;
     std::tr1::unordered_set<AttrKey, AttrKeyHash> seedSet;
+    // 预留容量，避免搜索过程中反复 rehash。
+    // sc 每轮会因 sc[cand.back()] 的 operator[] 插入 cand.size() 个新键，
+    // 轮数 × cand 规模可达数万，这里给一个保守上界。
+    // 只影响 bucket 分配，不影响任何计算结果或遍历顺序（unordered 的
+    // 桶数变化理论上会改变迭代顺序，但本函数只读 sc，不遍历 sc）。
+    sc.reserve(1 << 14);
+    seedSet.reserve(1 << 14);
+    cand.reserve(1 << 10);
+    cand2.reserve(1 << 10);
     int step = initStep;
     timeval tv2;
     double tvdiff;
@@ -5227,12 +5278,12 @@ AttrPair calcAttr(const AttrEval& eval)
     attrEvalAliveCount = 0;
     attrEvalWorkingCount = 0;
     attrEvalTaskCount = 0;
-    for (int i = 0; i < numThreads; ++i)
+    for (int i = 0; i < effThreads; ++i)
     {
         pthread_create(&threads[i], &threadAttr, &attrEvalWorker, NULL);
     }
     pthread_mutex_lock(&threadMutex);
-    while (attrEvalAliveCount < numThreads)
+    while (attrEvalAliveCount < effThreads)
     {
         pthread_cond_wait(&attrEvalFinishCond, &threadMutex);
     }
@@ -5508,7 +5559,8 @@ int main(int argc, char* argv[])
     for (;;)
     {
         printf("\n");
-        printf("Number of threads for calculation: %d\n", numThreads);
+        printf("Number of threads for calculation: %d%s\n", effectiveThreads(),
+            numThreads == 0 ? " (auto)" : "");
         if (ciTest == 0)
         {
             printf("Number of tests for win rate calculation: %d\n", numTests);
@@ -5813,9 +5865,10 @@ int main(int argc, char* argv[])
                 }
             }
 
-            std::vector<pthread_t> threads(numThreads);
+            const int effThreads2 = effectiveThreads();
+            std::vector<pthread_t> threads(effThreads2);
             myrand(&rseedGlobal, 1);
-            for (int i = 0; i < numThreads; ++i)
+            for (int i = 0; i < effThreads2; ++i)
             {
                 pthread_create(&threads[i], &threadAttr, &rankWorker, reinterpret_cast<void*>(rseedGlobal));
             }
@@ -5931,8 +5984,9 @@ int main(int argc, char* argv[])
         else if (strcmp(tok, "threads") == 0)
         {
             int n = 0;
+            // 0 = 自动（按 CPU 核心数）
             if ((tok = strtok(NULL, " \n\r\t")) == NULL ||
-                sscanf(tok, "%d", &n) != 1 || n < 1)
+                sscanf(tok, "%d", &n) != 1 || n < 0)
             {
                 printf("Invalid parameter\n");
                 continue;
@@ -5943,6 +5997,7 @@ int main(int argc, char* argv[])
                 continue;
             }
             numThreads = n;
+            printf("Threads set to %d%s\n", effectiveThreads(), n == 0 ? " (auto)" : "");
         }
         else if (strcmp(tok, "tests") == 0)
         {
