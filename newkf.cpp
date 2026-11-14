@@ -5256,13 +5256,10 @@ AttrPair calcAttr(const AttrEval& eval)
     std::vector<AttrKey> newSeed, cand, cand2;
     std::vector<AttrKey>* pSeed = &attrSeed;
     std::tr1::unordered_set<AttrKey, AttrKeyHash> seedSet;
-    // 预留容量，避免搜索过程中反复 rehash。
-    // sc 每轮会因 sc[cand.back()] 的 operator[] 插入 cand.size() 个新键，
-    // 轮数 × cand 规模可达数万，这里给一个保守上界。
-    // 只影响 bucket 分配，不影响任何计算结果或遍历顺序（unordered 的
-    // 桶数变化理论上会改变迭代顺序，但本函数只读 sc，不遍历 sc）。
-    sc.reserve(1 << 14);
-    seedSet.reserve(1 << 14);
+    // 注意：不要给 sc / seedSet 加 reserve()。
+    // GCC 的 std::tr1::unordered_map 没有 reserve()（只有 rehash()），
+    // 加了会编译失败。而且实测 reserve 对性能没有可测量的影响，
+    // 因为瓶颈在 calcBattle 的模拟本体，不在容器扩容。
     cand.reserve(1 << 10);
     cand2.reserve(1 << 10);
     int step = initStep;
